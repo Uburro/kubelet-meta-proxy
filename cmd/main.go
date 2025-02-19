@@ -48,6 +48,26 @@ var (
 	setupLog = ctrl.Log.WithName("setup")
 )
 
+type Config struct {
+	MaxConcurrency   int
+	MetricsPort      string
+	CacheSyncTimeout time.Duration
+	MetricsAddr      string
+	MetricsCertPath  string
+	MetricsCertName  string
+	MetricsCertKey   string
+	WebhookCertPath  string
+	WebhookCertName  string
+	WebhookCertKey   string
+	ProbeAddr        string
+	SecureMetrics    bool
+	EnableHTTP2      bool
+	NodeNameOrIP     string
+	KubeApiserver    string
+	NodePort         string
+	TLSOpts          []func(*tls.Config)
+}
+
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
@@ -56,41 +76,32 @@ func init() {
 
 // nolint:gocyclo
 func main() {
-	maxConcurrency := 5
-	var metricsPort string
-	var cacheSyncTimeout time.Duration = 30 * time.Second
-	var metricsAddr string
-	var metricsCertPath, metricsCertName, metricsCertKey string
-	var webhookCertPath, webhookCertName, webhookCertKey string
-	// Enable leader election for controller manager has to be disabled.
-	var enableLeaderElection bool
-	var probeAddr string
-	var secureMetrics bool
-	var enableHTTP2 bool
-	var nodeNameOrIP string
-	var kubeApiserver string
-	var nodePort string
-	var tlsOpts []func(*tls.Config)
-	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
+	config := Config{
+		MaxConcurrency:   5,
+		CacheSyncTimeout: 30 * time.Second,
+	}
+
+	flag.StringVar(&config.MetricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
-	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
-	flag.BoolVar(&secureMetrics, "metrics-secure", true,
+	flag.StringVar(&config.ProbeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	flag.BoolVar(&config.SecureMetrics, "metrics-secure", true,
 		"If set, the metrics endpoint is served securely via HTTPS. Use --metrics-secure=false to use HTTP instead.")
-	flag.StringVar(&webhookCertPath, "webhook-cert-path", "", "The directory that contains the webhook certificate.")
-	flag.StringVar(&webhookCertName, "webhook-cert-name", "tls.crt", "The name of the webhook certificate file.")
-	flag.StringVar(&webhookCertKey, "webhook-cert-key", "tls.key", "The name of the webhook key file.")
-	flag.StringVar(&metricsCertPath, "metrics-cert-path", "",
+	flag.StringVar(&config.WebhookCertPath, "webhook-cert-path", "", "The directory that contains the webhook certificate.")
+	flag.StringVar(&config.WebhookCertName, "webhook-cert-name", "tls.crt", "The name of the webhook certificate file.")
+	flag.StringVar(&config.WebhookCertKey, "webhook-cert-key", "tls.key", "The name of the webhook key file.")
+	flag.StringVar(&config.MetricsCertPath, "metrics-cert-path", "",
 		"The directory that contains the metrics server certificate.")
-	flag.StringVar(&metricsCertName, "metrics-cert-name", "tls.crt", "The name of the metrics server certificate file.")
-	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
-	flag.IntVar(&maxConcurrency, "max-concurrency", maxConcurrency, "The maximum number of concurrent reconciles.")
-	flag.DurationVar(&cacheSyncTimeout, "cache-sync-timeout", cacheSyncTimeout, "Cache sync timeout.")
-	flag.BoolVar(&enableHTTP2, "enable-http2", false,
+	flag.StringVar(&config.MetricsCertName, "metrics-cert-name", "tls.crt", "The name of the metrics server certificate file.")
+	flag.StringVar(&config.MetricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
+	flag.IntVar(&config.MaxConcurrency, "max-concurrency", config.MaxConcurrency, "The maximum number of concurrent reconciles.")
+	flag.DurationVar(&config.CacheSyncTimeout, "cache-sync-timeout", config.CacheSyncTimeout, "Cache sync timeout.")
+	flag.BoolVar(&config.EnableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
-	flag.StringVar(&metricsPort, "metrics-port", "8080", "Port to run our custom cAdvisor metrics server.")
-	flag.StringVar(&nodeNameOrIP, "node-name-or-ip", "localhost", "The name or IP of the node.")
-	flag.StringVar(&nodePort, "node-port", "10250", "The port of the kubelet.")
-	flag.StringVar(&kubeApiserver, "kube-apiserver", "", "The address of the kube-apiserver.")
+	flag.StringVar(&config.MetricsPort, "metrics-port", "8080", "Port to run our custom cAdvisor metrics server.")
+	flag.StringVar(&config.NodeNameOrIP, "node-name-or-ip", "localhost", "The name or IP of the node.")
+	flag.StringVar(&config.NodePort, "node-port", "10250", "The port of the kubelet.")
+	flag.StringVar(&config.KubeApiserver, "kube-apiserver", "", "The address of the kube-apiserver.")
+
 	opts := zap.Options{
 		Development: true,
 	}
@@ -110,24 +121,24 @@ func main() {
 		c.NextProtos = []string{"http/1.1"}
 	}
 
-	if !enableHTTP2 {
-		tlsOpts = append(tlsOpts, disableHTTP2)
+	if !config.EnableHTTP2 {
+		config.TLSOpts = append(config.TLSOpts, disableHTTP2)
 	}
 
 	// Create watchers for metrics and webhooks certificates
 	var metricsCertWatcher, webhookCertWatcher *certwatcher.CertWatcher
 
 	// Initial webhook TLS options
-	webhookTLSOpts := tlsOpts
+	webhookTLSOpts := config.TLSOpts
 
-	if len(webhookCertPath) > 0 {
+	if len(config.WebhookCertPath) > 0 {
 		setupLog.Info("Initializing webhook certificate watcher using provided certificates",
-			"webhook-cert-path", webhookCertPath, "webhook-cert-name", webhookCertName, "webhook-cert-key", webhookCertKey)
+			"webhook-cert-path", config.WebhookCertPath, "webhook-cert-name", config.WebhookCertName, "webhook-cert-key", config.WebhookCertKey)
 
 		var err error
 		webhookCertWatcher, err = certwatcher.New(
-			filepath.Join(webhookCertPath, webhookCertName),
-			filepath.Join(webhookCertPath, webhookCertKey),
+			filepath.Join(config.WebhookCertPath, config.WebhookCertName),
+			filepath.Join(config.WebhookCertPath, config.WebhookCertKey),
 		)
 		if err != nil {
 			setupLog.Error(err, "Failed to initialize webhook certificate watcher")
@@ -148,12 +159,12 @@ func main() {
 	// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.19.4/pkg/metrics/server
 	// - https://book.kubebuilder.io/reference/metrics.html
 	metricsServerOptions := metricsserver.Options{
-		BindAddress:   metricsAddr,
-		SecureServing: secureMetrics,
-		TLSOpts:       tlsOpts,
+		BindAddress:   config.MetricsAddr,
+		SecureServing: config.SecureMetrics,
+		TLSOpts:       config.TLSOpts,
 	}
 
-	if secureMetrics {
+	if config.SecureMetrics {
 		// FilterProvider is used to protect the metrics endpoint with authn/authz.
 		// These configurations ensure that only authorized users and service accounts
 		// can access the metrics endpoint. The RBAC are configured in 'config/rbac/kustomization.yaml'. More info:
@@ -169,14 +180,14 @@ func main() {
 	// - [METRICS-WITH-CERTS] at config/default/kustomization.yaml to generate and use certificates
 	// managed by cert-manager for the metrics server.
 	// - [PROMETHEUS-WITH-CERTS] at config/prometheus/kustomization.yaml for TLS certification.
-	if len(metricsCertPath) > 0 {
+	if len(config.MetricsCertPath) > 0 {
 		setupLog.Info("Initializing metrics certificate watcher using provided certificates",
-			"metrics-cert-path", metricsCertPath, "metrics-cert-name", metricsCertName, "metrics-cert-key", metricsCertKey)
+			"metrics-cert-path", config.MetricsCertPath, "metrics-cert-name", config.MetricsCertName, "metrics-cert-key", config.MetricsCertKey)
 
 		var err error
 		metricsCertWatcher, err = certwatcher.New(
-			filepath.Join(metricsCertPath, metricsCertName),
-			filepath.Join(metricsCertPath, metricsCertKey),
+			filepath.Join(config.MetricsCertPath, config.MetricsCertName),
+			filepath.Join(config.MetricsCertPath, config.MetricsCertKey),
 		)
 		if err != nil {
 			setupLog.Error(err, "to initialize metrics certificate watcher", "error", err)
@@ -192,8 +203,8 @@ func main() {
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
-		HealthProbeBindAddress: probeAddr,
-		LeaderElection:         enableLeaderElection,
+		HealthProbeBindAddress: config.ProbeAddr,
+		LeaderElection:         false,
 		LeaderElectionID:       "620d4b23.uburro.io",
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
@@ -236,7 +247,7 @@ func main() {
 		Client:           mgr.GetClient(),
 		Scheme:           mgr.GetScheme(),
 		NamespaceMetrics: namespaceMetrics,
-	}).SetupWithManager(mgr, maxConcurrency, cacheSyncTimeout); err != nil {
+	}).SetupWithManager(mgr, config.MaxConcurrency, config.CacheSyncTimeout); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "NodeConfigurator")
 		os.Exit(1)
 	}
@@ -252,11 +263,11 @@ func main() {
 
 	metricsServerRunnable := metrics.NewServerRunnable(
 		mgr.GetConfig(),
-		metricsPort,
+		config.MetricsPort,
 		namespaceMetrics,
-		kubeApiserver,
-		nodeNameOrIP,
-		nodePort,
+		config.KubeApiserver,
+		config.NodeNameOrIP,
+		config.NodePort,
 	)
 
 	// Register the metrics server runnable with the manager.
